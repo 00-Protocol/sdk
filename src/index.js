@@ -1,20 +1,25 @@
 /**
- * @00-protocol/sdk — Main Entry Point
+ * @00-protocol/sdk
  *
- * Privacy toolkit for Bitcoin Cash:
- * - Stealth Addresses (BIP352)
- * - Silent CoinJoin
- * - Onion Relay
- * - Encrypted Chat (CCSH)
- * - WizardConnect (HD wallet protocol)
- * - Common crypto primitives
+ * 00 Protocol SDK — application-layer privacy primitives.
+ *
+ * Modules (current):
+ *   - chat       : CCSHChat — split-knowledge encrypted messaging (OP_RETURN + Nostr)
+ *   - wizconnect : WizardConnect — BCH dapp/wallet connection protocol (NIP-04)
+ *   - common     : Shared crypto primitives
+ *
+ * Modules (coming soon):
+ *   - pay        : 00 Pay — payment terminal & QR invoices
+ *   - vault      : 00 Vault — MuSig2 stealth multisig
+ *   - subscription: 00 Subscription — recurring BCH payments
+ *   - dex        : 00 DEX — on-chain CashToken swaps
+ *   - swap       : 00 Swap — atomic cross-chain swaps (BCH/BTC/XMR)
+ *
+ * BCH stealth/joiner/onion/indexer primitives live in @BCHStealthProtocol/sdk
  *
  * @module @00-protocol/sdk
  */
 
-export * as stealth from './stealth/index.js';
-export * as joiner from './joiner/index.js';
-export * as onion from './onion/index.js';
-export * as chat from './chat/index.js';
-export * as wizconnect from './wizconnect/index.js';
-export * as common from './common/index.js';
+export * from './chat/index.js';
+export * from './wizconnect/index.js';
+export * from './common/index.js';
