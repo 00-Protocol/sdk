@@ -1,19 +1,37 @@
 {
   "name": "@00-protocol/sdk",
   "version": "1.0.0-beta.1",
-  "description": "00 Protocol SDK — Encrypted Chat, Pay, Vault, Subscription, DEX, Swap for Bitcoin Cash",
+  "description": "00 Protocol SDK \u2014 Privacy app layer for Bitcoin Cash",
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./chat": "./src/chat/index.js",
+    "./stealth": "./src/stealth/index.js",
+    "./joiner": "./src/joiner/index.js",
+    "./onion": "./src/onion/index.js",
+    "./indexer": "./src/indexer/index.js",
     "./wizconnect": "./src/wizconnect/index.js",
+    "./chat": "./src/chat/index.js",
     "./common": "./src/common/index.js"
   },
-  "files": ["src/"],
-  "keywords": ["bitcoin-cash", "bch", "chat", "vault", "dex", "swap", "privacy", "nostr"],
+  "files": [
+    "src/"
+  ],
+  "keywords": [
+    "bitcoin-cash",
+    "bch",
+    "chat",
+    "vault",
+    "dex",
+    "swap",
+    "privacy",
+    "nostr"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/00-Protocol/sdk" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/00-Protocol/sdk"
+  },
   "dependencies": {
     "@noble/curves": "^1.8.1",
     "@noble/hashes": "^1.7.1"
