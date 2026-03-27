@@ -1,0 +1,24 @@
+{
+  "name": "@00-protocol/sdk",
+  "version": "1.0.0-beta.1",
+  "description": "Privacy toolkit for Bitcoin Cash — Stealth Addresses, Silent CoinJoin, Onion Relay, Encrypted Chat",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./stealth": "./src/stealth/index.js",
+    "./joiner": "./src/joiner/index.js",
+    "./onion": "./src/onion/index.js",
+    "./chat": "./src/chat/index.js",
+    "./wizconnect": "./src/wizconnect/index.js",
+    "./common": "./src/common/index.js"
+  },
+  "files": ["src/"],
+  "keywords": ["bitcoin-cash", "bch", "stealth", "coinjoin", "privacy", "nostr", "onion"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/00-Protocol/sdk" },
+  "dependencies": {
+    "@noble/curves": "^1.8.1",
+    "@noble/hashes": "^1.7.1"
+  }
+}
