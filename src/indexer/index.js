@@ -1,5 +1,5 @@
 /**
- * @BCHStealthProtocol/sdk — BCHPubkeyIndexer Client
+ * @00-protocol/sdk — BCHPubkeyIndexer Client
  *
  * Lightweight client for the BCH Pubkey Indexer API. Fetches P2PKH input
  * pubkeys for a block range, enabling client-side stealth address scanning
@@ -11,7 +11,7 @@
  * Desktop wallets can also self-host the indexer (BCH-Stealth-Protocol repo).
  * Lightweight clients connect to a hosted indexer over HTTP or Tor.
  *
- * @module @BCHStealthProtocol/sdk/indexer
+ * @module @00-protocol/sdk/indexer
  */
 
 /**
@@ -33,7 +33,7 @@
  * them and filter locally using ECDH.
  *
  * @example
- * import { BCHPubkeyIndexer } from '@BCHStealthProtocol/sdk/indexer';
+ * import { BCHPubkeyIndexer } from '@00-protocol/sdk/indexer';
  *
  * const indexer = new BCHPubkeyIndexer('https://indexer.0penw0rld.com');
  *

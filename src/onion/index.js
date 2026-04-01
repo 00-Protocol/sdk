@@ -347,22 +347,27 @@ export async function giftWrap(authorPriv, recipientPubHex, innerKind, innerCont
  * @returns {Promise<{ rumor: Object, sealPubkey: string }|null>} Inner rumor + real sender, or null
  */
 export async function giftUnwrap(myPriv, wrapEvent) {
+  // Not a gift wrap — caller should filter, not an error
+  if (!wrapEvent || wrapEvent.kind !== 1059) return null;
+
+  // Verify wrap signature — invalid sig is a security violation, throw explicitly
+  const wrapIdHash = sha256(utf8(JSON.stringify([0, wrapEvent.pubkey, wrapEvent.created_at, 1059, wrapEvent.tags, wrapEvent.content])));
+  if (!schnorr.verify(h2b(wrapEvent.sig), wrapIdHash, h2b(wrapEvent.pubkey))) {
+    throw new Error('giftUnwrap: invalid wrap signature');
+  }
+
   try {
-    if (wrapEvent.kind !== 1059) return null;
-
-    // Verify wrap signature
-    const wrapIdHash = sha256(utf8(JSON.stringify([0, wrapEvent.pubkey, wrapEvent.created_at, 1059, wrapEvent.tags, wrapEvent.content])));
-    if (!schnorr.verify(h2b(wrapEvent.sig), wrapIdHash, h2b(wrapEvent.pubkey))) return null;
-
-    // Unwrap Layer 3
+    // Unwrap Layer 3 — decryption failure means event is not addressed to us
     const sealJson = await nip44Decrypt(myPriv, wrapEvent.pubkey, wrapEvent.content);
     if (!sealJson) return null;
     const seal = JSON.parse(sealJson);
     if (seal.kind !== 13) return null;
 
-    // Verify seal signature
+    // Verify seal signature — inner sig invalid is a security violation
     const sealIdHash = sha256(utf8(JSON.stringify([0, seal.pubkey, seal.created_at, 13, seal.tags, seal.content])));
-    if (!schnorr.verify(h2b(seal.sig), sealIdHash, h2b(seal.pubkey))) return null;
+    if (!schnorr.verify(h2b(seal.sig), sealIdHash, h2b(seal.pubkey))) {
+      throw new Error('giftUnwrap: invalid seal signature');
+    }
 
     // Unwrap Layer 2
     const rumorJson = await nip44Decrypt(myPriv, seal.pubkey, seal.content);
@@ -370,7 +375,11 @@ export async function giftUnwrap(myPriv, wrapEvent) {
     const rumor = JSON.parse(rumorJson);
 
     return { rumor, sealPubkey: seal.pubkey };
-  } catch { return null; }
+  } catch (e) {
+    // Re-throw security errors; swallow decryption failures (not our message)
+    if (e.message?.startsWith('giftUnwrap:')) throw e;
+    return null;
+  }
 }
 
 /* ========================================================================
@@ -480,13 +489,15 @@ export class OnionRelay {
    * @returns {Promise<void>}
    */
   async announce() {
+    const { uptime, relayed } = this.stats;
     const content = JSON.stringify({
       version: 2,
       pubkey: this._pub,
-      uptime: this.stats.uptime,
-      relayed: this._relayedCount,
+      uptime,
+      relayed,
     });
-    const event = await makeNostrEvent(this._priv, 22230, content, []);
+    // Tag with pool identifier so peers can discover via subscription filter
+    const event = await makeNostrEvent(this._priv, 22230, content, [['t', '0penw0rld-onion-pool']]);
     const msg = JSON.stringify(['EVENT', event]);
     for (const [, ws] of this._sockets) {
       if (ws.readyState === 1) {

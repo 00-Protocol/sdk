@@ -208,6 +208,7 @@ export async function ccshDecryptPacket(raw, myPriv32) {
  * @returns {[Uint8Array, Uint8Array]} [shard, pad]
  */
 export function xorSplit(data) {
+  if (!data || data.length === 0) throw new Error('xorSplit: input must be non-empty');
   const pad = rand(data.length);
   const shard = new Uint8Array(data.length);
   for (let i = 0; i < data.length; i++) shard[i] = data[i] ^ pad[i];
@@ -221,7 +222,8 @@ export function xorSplit(data) {
  * @returns {Uint8Array}
  */
 export function xorMerge(shard, pad) {
-  if (shard.length !== pad.length) throw new Error('XOR length mismatch');
+  if (!shard || !pad) throw new Error('xorMerge: inputs must be non-null');
+  if (shard.length !== pad.length) throw new Error(`xorMerge: length mismatch (${shard.length} vs ${pad.length})`);
   const out = new Uint8Array(shard.length);
   for (let i = 0; i < shard.length; i++) out[i] = shard[i] ^ pad[i];
   return out;
@@ -315,6 +317,9 @@ export async function splitEncrypt(plaintext, recipientPubHex) {
  * @returns {Promise<string>} Decrypted plaintext
  */
 export async function splitDecrypt(chainBlob, relayBlob, ephPub, myPriv32) {
+  if (!chainBlob || !relayBlob || !ephPub || !myPriv32) throw new Error('splitDecrypt: missing required arguments');
+  if (ephPub.length !== 32) throw new Error('splitDecrypt: ephPub must be 32 bytes (X25519)');
+  if (myPriv32.length !== 32) throw new Error('splitDecrypt: myPriv32 must be 32 bytes');
   const shared = x25519.getSharedSecret(myPriv32, ephPub);
   const shard = await aesUnwrap(chainBlob, deriveKeyChain(shared));
   const pad = await aesUnwrap(relayBlob, deriveKeyRelay(shared));
