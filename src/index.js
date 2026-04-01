@@ -1,18 +1,15 @@
 /**
  * @00-protocol/sdk
  *
- * 00 Protocol SDK — privacy and application layer for Bitcoin Cash.
+ * Privacy and application layer for Bitcoin Cash.
  *
- * Shared primitives (identical in @BCHStealthProtocol/sdk):
  *   stealth    — BIP352-style ECDH stealth addresses
- *   joiner     — Silent CoinJoin / Fusion (Nostr-coordinated)
- *   onion      — Onion relay client crypto (decentralized relay network)
- *   indexer    — BCHPubkeyIndexer HTTP client
+ *   joiner     — Silent CoinJoin / Fusion (Nostr-coordinated, NIP-59)
+ *   onion      — Onion relay client crypto
+ *   indexer    — BCH pubkey indexer HTTP client
  *   wizconnect — WizardConnect dapp/wallet bridge
+ *   chat       — CCSH split-knowledge encrypted messaging (OP_RETURN + Nostr)
  *   common     — Crypto utility layer (CashAddr, BIP32, secp256k1, Nostr)
- *
- * 00 Protocol specific:
- *   chat       — CCSHChat split-knowledge encrypted messaging (OP_RETURN + Nostr)
  *
  * @module @00-protocol/sdk
  */
