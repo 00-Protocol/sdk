@@ -69,8 +69,22 @@ export const WIZ_EXTENSIONS = Object.freeze({
   },
 });
 
-/** Default Nostr relay for WizardConnect */
+/**
+ * Default Nostr relay for WizardConnect.
+ * Falls back to the first available relay in WIZ_DEFAULT_RELAYS.
+ */
 export const WIZ_DEFAULT_RELAY = 'wss://relay.cauldron.quest:443';
+
+/**
+ * Ordered list of fallback relays for WizardConnect.
+ * The first reachable relay is used when no explicit relay is provided.
+ */
+export const WIZ_DEFAULT_RELAYS = [
+  'wss://relay.cauldron.quest:443',
+  'wss://relay.damus.io',
+  'wss://nos.lol',
+  'wss://relay.primal.net',
+];
 
 /* ========================================================================
    URI Encoding / Decoding (wiz:// scheme)
@@ -328,7 +342,7 @@ export class WizardConnect {
    */
   constructor({ role, nostrRelays, dappName, dappIcon }) {
     this._role = role;
-    this._relayUrls = nostrRelays || [WIZ_DEFAULT_RELAY];
+    this._relayUrls = nostrRelays || WIZ_DEFAULT_RELAYS;
     this._dappName = dappName || '00 Protocol';
     this._dappIcon = dappIcon || '';
 
