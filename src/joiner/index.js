@@ -3,7 +3,7 @@
  *
  * Protocol logic for multi-party CoinJoin mixing on Bitcoin Cash.
  * Coordinates pool discovery (Nostr kind 22230), round management via
- * NIP-59 gift-wrapped messages (kind 22231), onion-encrypted blind outputs,
+ * NIP-59 gift-wrapped messages (kind 22231), onion relay blobs (kind 22232),
  * multi-input/multi-output signing, and self-stealth address derivation.
  *
  * @module @00-protocol/sdk/joiner

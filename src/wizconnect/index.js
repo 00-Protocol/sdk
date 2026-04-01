@@ -531,8 +531,13 @@ export class WizardConnect {
 
     relay.onMessage((payload, senderPub) => {
       if (payload.action === WIZ_ACTION.WALLET_READY) {
-        // Verify secret (MITM prevention)
-        if (payload.secret !== peerSecret) return;
+        // Verify secret — emit error and close if mismatch (MITM prevention)
+        if (payload.secret !== peerSecret) {
+          const err = new Error('WizardConnect: secret mismatch — possible MITM attack');
+          if (this._onError) this._onError(err);
+          relay.close();
+          return;
+        }
 
         this._peerName = payload.wallet_name || 'Unknown Wallet';
         this._peerIcon = payload.wallet_icon || '';

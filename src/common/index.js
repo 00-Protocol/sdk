@@ -86,15 +86,17 @@ export function u32LE(n) {
 }
 
 /**
- * Encode a number as unsigned 64-bit little-endian.
- * @param {number} n
+ * Encode a number or BigInt as unsigned 64-bit little-endian.
+ * Accepts both Number and BigInt to safely handle amounts above 2^53 satoshis.
+ * @param {number|bigint} n
  * @returns {Uint8Array}
  */
 export function u64LE(n) {
+  const big = BigInt(n);
   const b = new Uint8Array(8);
   const v = new DataView(b.buffer);
-  v.setUint32(0, n >>> 0, true);
-  v.setUint32(4, Math.floor(n / 0x100000000) >>> 0, true);
+  v.setUint32(0, Number(big & 0xffffffffn), true);
+  v.setUint32(4, Number((big >> 32n) & 0xffffffffn), true);
   return b;
 }
 

@@ -40,14 +40,18 @@ export const JOINER_PAD_SIZE = 80;
  * @returns {Promise<Uint8Array>} Encrypted blob: ephPub(33) || nonce(12) || ct+tag
  */
 export async function onionLayer(data, peelerPubHex) {
-  const eph = rand(32);
-  const ephPub = secp256k1.getPublicKey(eph, true);
-  const shared = secp256k1.getSharedSecret(eph, h2b('02' + peelerPubHex)).slice(1, 33);
-  const aesKey = sha256(shared);
-  const iv = rand(12);
-  const key = await crypto.subtle.importKey('raw', aesKey, { name: 'AES-GCM' }, false, ['encrypt']);
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, data));
-  return concat(ephPub, iv, ct);
+  try {
+    const eph = rand(32);
+    const ephPub = secp256k1.getPublicKey(eph, true);
+    const shared = secp256k1.getSharedSecret(eph, h2b('02' + peelerPubHex)).slice(1, 33);
+    const aesKey = sha256(shared);
+    const iv = rand(12);
+    const key = await crypto.subtle.importKey('raw', aesKey, { name: 'AES-GCM' }, false, ['encrypt']);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, data));
+    return concat(ephPub, iv, ct);
+  } catch (e) {
+    throw new Error('onionLayer failed: ' + e.message);
+  }
 }
 
 /**
@@ -59,15 +63,21 @@ export async function onionLayer(data, peelerPubHex) {
  * @param {Uint8Array} blob - Encrypted onion blob
  * @param {Uint8Array} myPriv - Peeler's private key (32 bytes)
  * @returns {Promise<Uint8Array>} Decrypted inner data
+ * @throws {Error} If blob is malformed or decryption fails (wrong key / corrupted data)
  */
 export async function onionPeel(blob, myPriv) {
-  const ephPub = blob.slice(0, 33);
-  const iv = blob.slice(33, 45);
-  const ct = blob.slice(45);
-  const shared = secp256k1.getSharedSecret(myPriv, ephPub).slice(1, 33);
-  const aesKey = sha256(shared);
-  const key = await crypto.subtle.importKey('raw', aesKey, { name: 'AES-GCM' }, false, ['decrypt']);
-  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, ct));
+  if (!blob || blob.length < 46) throw new Error('onionPeel: blob too short');
+  try {
+    const ephPub = blob.slice(0, 33);
+    const iv = blob.slice(33, 45);
+    const ct = blob.slice(45);
+    const shared = secp256k1.getSharedSecret(myPriv, ephPub).slice(1, 33);
+    const aesKey = sha256(shared);
+    const key = await crypto.subtle.importKey('raw', aesKey, { name: 'AES-GCM' }, false, ['decrypt']);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, ct));
+  } catch (e) {
+    throw new Error('onionPeel failed: ' + e.message);
+  }
 }
 
 /**
@@ -421,7 +431,7 @@ export class OnionRelay {
           const subId = 'onion_' + this._pub.slice(0, 8);
           this._subIds.push(subId);
           ws.send(JSON.stringify(['REQ', subId, {
-            kinds: [22231],
+            kinds: [22232],
             '#p': [this._pub],
             since: Math.floor(Date.now() / 1000) - 600,
           }]));
