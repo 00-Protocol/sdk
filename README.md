@@ -19,24 +19,27 @@ npm install @noble/ciphers
 
 ### Stealth Addresses (BIP352)
 
-Derive stealth keys from a BIP39 seed and generate one-time addresses that prevent on-chain address reuse.
+Derive stealth keys from a BIP39 seed and generate one-time addresses that prevent on-chain address reuse. Uses BIP352 aggregated ECDH — **1 ECDH per TX** regardless of input count, no OP_RETURN needed.
 
 ```javascript
-import { StealthKeys } from '@00-protocol/sdk/stealth';
+import { StealthKeys, deriveStealthSendAddr, scanForStealthPayments } from '@00-protocol/sdk/stealth';
 
 // Receiver: derive keys from seed
 const sk = StealthKeys.fromSeed(seedHex);
 const code = sk.stealthCode;  // share this with payers
 
-// Sender: derive a one-time address from the stealth code
-const { addr, ephPub } = StealthKeys.deriveSendAddress(code);
-// Send BCH to `addr`, publish `ephPub` in OP_RETURN
+// Sender: derive a one-time address (BIP352 — needs input privkeys + outpoints)
+const outpoints = utxos.map(u => ({ txid: u.txid, vout: u.vout }));
+const privKeys   = utxos.map(u => u.privKey);
+const { addr } = sk.deriveSendAddress(code, privKeys, outpoints);
+// Send BCH to `addr` — TX looks like a standard P2PKH, no metadata on-chain
 
-// Receiver: scan for incoming payments
-const matches = sk.scanBlock(ephemeralPubkeys);
-for (const m of matches) {
-  console.log('Found payment at', m.address);
-  // m.privKey can spend this output
+// Receiver: scan for incoming payments (fetches raw TXs to extract input pubkeys)
+const fetchTx = txid => fetch(`https://fulcrum/tx/${txid}`).then(r => r.text());
+const found = await sk.scan(indexerEntries, fetchTx);
+for (const m of found) {
+  console.log('Found payment at', m.addr, '—', m.value, 'sats');
+  // stealthSpendingKey(sk.spendPriv, m.tBig) can spend this output
 }
 ```
 
