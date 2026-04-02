@@ -1,10 +1,9 @@
 /**
  * @00-protocol/sdk — BIP352 Stealth Address Module
  *
- * ECDH-based stealth addresses for Bitcoin Cash. Allows senders to derive
- * one-time addresses for recipients without any on-chain address reuse.
- * Implements the full lifecycle: key derivation, address generation,
- * sending, scanning, and spending.
+ * ECDH-based stealth addresses for Bitcoin Cash.
+ * v2 — BIP352 aggregated ECDH: sender sums all input private keys,
+ * receiver sums all input public keys → 1 ECDH per TX.
  *
  * @module @00-protocol/sdk/stealth
  */
@@ -22,11 +21,24 @@ import {
 const N_SECP = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
 
 /* ========================================================================
+   Internal helpers
+   ======================================================================== */
+
+/** Lexicographic byte comparison. Returns negative / 0 / positive. */
+function _compareBytes(a, b) {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+/* ========================================================================
    Low-Level Stealth Primitives
    ======================================================================== */
 
 /**
- * Derive a one-time stealth public key (sender side).
+ * Derive a one-time stealth public key (sender side, single-input).
  *
  * ECDH: senderPriv x recipScanPub => shared secret
  * Tweak: c = SHA256( SHA256(sharedX) || tweakData )
@@ -35,7 +47,7 @@ const N_SECP = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD036414
  * @param {Uint8Array} senderPriv - Sender's private key (32 bytes)
  * @param {Uint8Array} recipScanPub - Recipient's scan public key (33 bytes compressed)
  * @param {Uint8Array} recipSpendPub - Recipient's spend public key (33 bytes compressed)
- * @param {Uint8Array} tweakData - Additional tweak data (e.g., ephPub or nonce)
+ * @param {Uint8Array} tweakData - Additional tweak data
  * @returns {{ pub: Uint8Array, cBig: bigint }} Stealth public key and tweak scalar
  */
 export function stealthDerive(senderPriv, recipScanPub, recipSpendPub, tweakData) {
@@ -51,15 +63,12 @@ export function stealthDerive(senderPriv, recipScanPub, recipSpendPub, tweakData
 }
 
 /**
- * Scan for a stealth payment (receiver side).
- *
- * ECDH: scanPriv x senderPub => shared secret
- * Derives the expected stealth pubkey and returns it for comparison.
+ * Scan for a stealth payment (receiver side, single pubkey).
  *
  * @param {Uint8Array} scanPriv - Receiver's scan private key (32 bytes)
  * @param {Uint8Array} senderPub - Sender's public key from TX input (33 bytes)
  * @param {Uint8Array} spendPub - Receiver's spend public key (33 bytes)
- * @param {Uint8Array} tweakData - Tweak data (e.g., ephPub from OP_RETURN)
+ * @param {Uint8Array} tweakData - Tweak data
  * @returns {{ pub: Uint8Array, cBig: bigint }}
  */
 export function stealthScan(scanPriv, senderPub, spendPub, tweakData) {
@@ -79,7 +88,7 @@ export function stealthScan(scanPriv, senderPub, spendPub, tweakData) {
  * spendingKey = spendPriv + c  (mod N)
  *
  * @param {Uint8Array} spendPriv - Receiver's spend private key (32 bytes)
- * @param {bigint} cBig - Tweak scalar from stealthScan
+ * @param {bigint} cBig - Tweak scalar from stealthScan or scanForStealthPayments
  * @returns {Uint8Array} 32-byte private key for the stealth output
  */
 export function stealthSpendingKey(spendPriv, cBig) {
@@ -93,13 +102,12 @@ export function stealthSpendingKey(spendPriv, cBig) {
  * @returns {string} BCH CashAddr
  */
 export function stealthPubToAddr(stealthPub) {
-  const hash = ripemd160(sha256(stealthPub));
-  return pubHashToCashAddr(hash);
+  return pubHashToCashAddr(ripemd160(sha256(stealthPub)));
 }
 
 /**
  * Encode scan + spend public keys as a stealth code string.
- * Format: "stealth:" + hex(scanPub) + hex(spendPub) = 132 hex chars after prefix.
+ * Format: "stealth:" + hex(scanPub) + hex(spendPub)
  *
  * @param {Uint8Array} scanPub - Scan public key (33 bytes)
  * @param {Uint8Array} spendPub - Spend public key (33 bytes)
@@ -139,66 +147,257 @@ export function checkStealthMatch(scanPriv, spendPub, senderInputPub, outputHash
   return b2h(expectedHash) === b2h(outputHash160);
 }
 
-/**
- * Derive a stealth address for sending to a recipient using an ephemeral keypair.
- *
- * The sender generates ephemeral keys, performs ECDH with the recipient's scan
- * pubkey, and derives a one-time address. The ephemeral public key is published
- * in an OP_RETURN output so the recipient can scan for it.
- *
- * @param {Uint8Array} recipScanPub - Recipient scan pubkey (33 bytes)
- * @param {Uint8Array} recipSpendPub - Recipient spend pubkey (33 bytes)
- * @returns {{ addr: string, pub: Uint8Array, ephPriv: Uint8Array, ephPub: Uint8Array }}
- */
-export function deriveStealthSendAddr(recipScanPub, recipSpendPub) {
-  const ephPriv = secp256k1.utils.randomPrivateKey();
-  const ephPub = secp256k1.getPublicKey(ephPriv, true);
+/* ========================================================================
+   BIP352 Aggregated ECDH — Send
+   ======================================================================== */
 
-  const shared = secp256k1.getSharedSecret(ephPriv, recipScanPub);
+/**
+ * Derive a stealth address for sending to a recipient (BIP352 aggregated ECDH).
+ *
+ * The sender aggregates all input private keys into a_sum, derives the
+ * corresponding public key A_sum, then computes:
+ *   input_hash = SHA256(smallest_outpoint || A_sum)
+ *   shared     = (a_sum × input_hash) × B_scan
+ *   t_k        = SHA256(sharedX || ser_32(k))
+ *   P_k        = B_spend + t_k × G
+ *
+ * Backward compatible: if no outpoints provided, falls back to single-input
+ * ECDH (useful for testing / legacy support).
+ *
+ * @param {Uint8Array}              recipScanPub   - Recipient scan pubkey (33 bytes)
+ * @param {Uint8Array}              recipSpendPub  - Recipient spend pubkey (33 bytes)
+ * @param {Uint8Array|Uint8Array[]} senderPrivKeys - All sender input private keys
+ * @param {Array}                   [outpoints]    - [{ txid: string (big-endian hex), vout: number }]
+ * @param {number}                  [outputIndex]  - Output index k (default 0)
+ * @returns {{ addr: string, pub: Uint8Array, A_sum: Uint8Array }}
+ */
+export function deriveStealthSendAddr(recipScanPub, recipSpendPub, senderPrivKeys, outpoints, outputIndex = 0) {
+  if (!Array.isArray(senderPrivKeys)) senderPrivKeys = [senderPrivKeys];
+
+  // ── Legacy fallback: no outpoints ────────────────────────────────────────
+  if (!outpoints || outpoints.length === 0) {
+    const priv = typeof senderPrivKeys[0] === 'string' ? h2b(senderPrivKeys[0]) : senderPrivKeys[0];
+    const senderPub = secp256k1.getPublicKey(priv, true);
+    const shared = secp256k1.getSharedSecret(priv, recipScanPub);
+    const sharedX = shared.slice(1, 33);
+    const c = sha256(concat(sha256(sharedX), senderPub));
+    const cBig = BigInt('0x' + b2h(c)) % N_SECP;
+    const spendPoint = secp256k1.ProjectivePoint.fromHex(recipSpendPub);
+    const stealthPoint = spendPoint.add(secp256k1.ProjectivePoint.BASE.multiply(cBig));
+    const stealthPubBytes = stealthPoint.toRawBytes(true);
+    return {
+      addr: pubHashToCashAddr(ripemd160(sha256(stealthPubBytes))),
+      pub: stealthPubBytes,
+      A_sum: senderPub,
+    };
+  }
+
+  // ── BIP352 aggregation ────────────────────────────────────────────────────
+
+  // 1. a_sum = Σ a_i  mod N
+  let a_sum = 0n;
+  for (const priv of senderPrivKeys) {
+    const privBytes = typeof priv === 'string' ? h2b(priv) : priv;
+    a_sum = (a_sum + BigInt('0x' + b2h(privBytes))) % N_SECP;
+  }
+  const a_sum_bytes = h2b(a_sum.toString(16).padStart(64, '0'));
+  const A_sum = secp256k1.getPublicKey(a_sum_bytes, true); // A_sum = a_sum × G
+
+  // 2. Smallest outpoint: lex-min of (txid_LE || vout_LE 4-byte)
+  //    Wallet txids are big-endian (human-readable) → reverse to wire LE
+  let smallest = null;
+  for (const op of outpoints) {
+    const txidHex = typeof op.txid === 'string' ? op.txid : b2h(op.txid);
+    const txidLE = h2b(txidHex).reverse();
+    const outpoint = concat(txidLE, u32LE(op.vout || 0));
+    if (!smallest || _compareBytes(outpoint, smallest) < 0) smallest = outpoint;
+  }
+
+  // 3. input_hash = SHA256(smallest_outpoint || A_sum)
+  const input_hash = sha256(concat(smallest, A_sum));
+  const input_hash_big = BigInt('0x' + b2h(input_hash)) % N_SECP;
+
+  // 4. Tweaked ECDH: shared = (a_sum × input_hash) × B_scan
+  const tweaked_a = (a_sum * input_hash_big) % N_SECP;
+  const tweaked_a_bytes = h2b(tweaked_a.toString(16).padStart(64, '0'));
+  const shared = secp256k1.getSharedSecret(tweaked_a_bytes, recipScanPub);
   const sharedX = shared.slice(1, 33);
 
-  const c = sha256(concat(sha256(sharedX), ephPub));
-  const cBig = BigInt('0x' + b2h(c)) % N_SECP;
+  // 5. t_k = SHA256(sharedX || ser_32(k))
+  const t = sha256(concat(sharedX, u32LE(outputIndex)));
+  const tBig = BigInt('0x' + b2h(t)) % N_SECP;
 
+  // 6. P_k = B_spend + t_k × G
   const spendPoint = secp256k1.ProjectivePoint.fromHex(recipSpendPub);
-  const tweakPoint = secp256k1.ProjectivePoint.BASE.multiply(cBig);
-  const stealthPoint = spendPoint.add(tweakPoint);
+  const stealthPoint = spendPoint.add(secp256k1.ProjectivePoint.BASE.multiply(tBig));
   const stealthPubBytes = stealthPoint.toRawBytes(true);
 
-  const addr = pubHashToCashAddr(ripemd160(sha256(stealthPubBytes)));
-
-  return { addr, pub: stealthPubBytes, ephPriv, ephPub };
+  return {
+    addr: pubHashToCashAddr(ripemd160(sha256(stealthPubBytes))),
+    pub: stealthPubBytes,
+    A_sum,
+  };
 }
+
+/* ========================================================================
+   BIP352 Aggregated ECDH — Scan
+   ======================================================================== */
+
+/**
+ * Scan indexer entries for stealth payments addressed to us (BIP352 aggregated).
+ *
+ * Groups entries by txid. For each TX:
+ *   A_sum       = Σ input pubkeys (EC point addition)
+ *   input_hash  = SHA256(smallest_outpoint || A_sum)
+ *   shared      = (b_scan × input_hash) × A_sum   [1 ECDH per TX]
+ *   t_k         = SHA256(sharedX || ser_32(k))
+ *   P_k         = B_spend + t_k × G
+ *
+ * Falls back to legacy single-input ECDH when entries lack outpoint data (v1 compat).
+ *
+ * @param {Object} keys    - { scanPriv, spendPub, spendPriv? } as Uint8Array or hex strings
+ * @param {Array}  entries - [{ txid, pubkey, height, outpointTxid?, outpointVout? }]
+ * @param {Function} [fetchTx] - Async fn(txid) => rawHex. Required for output matching.
+ * @returns {Promise<Array>} Found payments [{ txid, height, value, outputIdx, addr, tBig }]
+ */
+export async function scanForStealthPayments(keys, entries, fetchTx) {
+  const scanPriv = typeof keys.scanPriv === 'string' ? h2b(keys.scanPriv) : keys.scanPriv;
+  const spendPub = typeof keys.spendPub === 'string' ? h2b(keys.spendPub) : keys.spendPub;
+  if (!scanPriv || !spendPub) throw new Error('scanForStealthPayments: scanPriv and spendPub required');
+  if (!fetchTx) throw new Error('scanForStealthPayments: fetchTx callback required');
+
+  const scanPrivBig = BigInt('0x' + b2h(scanPriv)) % N_SECP;
+
+  // Group by txid
+  const txMap = new Map();
+  for (const e of entries) {
+    if (!e.pubkey || !e.txid) continue;
+    if (!txMap.has(e.txid)) txMap.set(e.txid, []);
+    txMap.get(e.txid).push(e);
+  }
+
+  const found = [];
+
+  for (const [txid, inputs] of txMap) {
+    const hasOutpoints = inputs.some(inp => inp.outpointTxid != null);
+
+    if (!hasOutpoints) {
+      // Legacy: single-input ECDH (v1 compat)
+      let rawHex;
+      try { rawHex = await fetchTx(txid); } catch { continue; }
+      if (!rawHex) continue;
+
+      const seenPubs = new Set();
+      for (const inp of inputs) {
+        const pubHex = typeof inp.pubkey === 'string' ? inp.pubkey : b2h(inp.pubkey);
+        if (seenPubs.has(pubHex)) continue;
+        seenPubs.add(pubHex);
+        try {
+          const senderPub = h2b(pubHex);
+          const shared = secp256k1.getSharedSecret(scanPriv, senderPub);
+          const sharedX = shared.slice(1, 33);
+          const c = sha256(concat(sha256(sharedX), senderPub));
+          const cBig = BigInt('0x' + b2h(c)) % N_SECP;
+          const spendPoint = secp256k1.ProjectivePoint.fromHex(spendPub);
+          const stealthPubBytes = spendPoint.add(secp256k1.ProjectivePoint.BASE.multiply(cBig)).toRawBytes(true);
+          const expectedHash = b2h(ripemd160(sha256(stealthPubBytes)));
+          const addr = pubHashToCashAddr(ripemd160(sha256(stealthPubBytes)));
+          for (const m of _matchOutputs(rawHex, expectedHash)) {
+            found.push({ txid, height: inp.height, value: m.value, outputIdx: m.idx, addr, tBig: cBig });
+          }
+        } catch { /* invalid pubkey */ }
+      }
+      continue;
+    }
+
+    // BIP352 path
+    let A_sum = null;
+    for (const inp of inputs) {
+      const pubHex = typeof inp.pubkey === 'string' ? inp.pubkey : b2h(inp.pubkey);
+      try {
+        const pt = secp256k1.ProjectivePoint.fromHex(pubHex);
+        A_sum = A_sum ? A_sum.add(pt) : pt;
+      } catch { continue; }
+    }
+    if (!A_sum) continue;
+    const A_sum_bytes = A_sum.toRawBytes(true);
+
+    let smallest = null;
+    for (const inp of inputs) {
+      if (inp.outpointTxid == null) continue;
+      const txidHex = typeof inp.outpointTxid === 'string' ? inp.outpointTxid : b2h(inp.outpointTxid);
+      const txidLE = h2b(txidHex).reverse();
+      const outpoint = concat(txidLE, u32LE(inp.outpointVout || 0));
+      if (!smallest || _compareBytes(outpoint, smallest) < 0) smallest = outpoint;
+    }
+    if (!smallest) continue;
+
+    const input_hash = sha256(concat(smallest, A_sum_bytes));
+    const input_hash_big = BigInt('0x' + b2h(input_hash)) % N_SECP;
+
+    const tweakedScanPrivBig = (scanPrivBig * input_hash_big) % N_SECP;
+    const tweakedScanPriv = h2b(tweakedScanPrivBig.toString(16).padStart(64, '0'));
+
+    const shared = secp256k1.getSharedSecret(tweakedScanPriv, A_sum_bytes);
+    const sharedX = shared.slice(1, 33);
+
+    let rawHex;
+    try { rawHex = await fetchTx(txid); } catch { continue; }
+    if (!rawHex) continue;
+
+    for (let k = 0; k < 3; k++) {
+      const t = sha256(concat(sharedX, u32LE(k)));
+      const tBig = BigInt('0x' + b2h(t)) % N_SECP;
+
+      const spendPoint = secp256k1.ProjectivePoint.fromHex(spendPub);
+      const stealthPubBytes = spendPoint.add(secp256k1.ProjectivePoint.BASE.multiply(tBig)).toRawBytes(true);
+      const expectedHash = b2h(ripemd160(sha256(stealthPubBytes)));
+      const addr = pubHashToCashAddr(ripemd160(sha256(stealthPubBytes)));
+
+      const matches = _matchOutputs(rawHex, expectedHash);
+      if (matches.length === 0) break;
+
+      for (const m of matches) {
+        found.push({
+          txid,
+          height: inputs[0]?.height,
+          value: m.value,
+          outputIdx: m.idx,
+          addr,
+          tBig,
+        });
+      }
+    }
+  }
+
+  return found;
+}
+
+/* ========================================================================
+   Self-Stealth (Fusion outputs / stealth change)
+   ======================================================================== */
 
 /**
  * Derive a self-stealth address for CoinJoin fusion outputs or stealth change.
- *
- * Uses ECDH: inputPriv x scanPub (symmetric: scanPriv x inputPub)
- * Nonce: outpoint || outputIndex
- * P = B_spend + c*G
- * Spending key: b_spend + c
  *
  * @param {Uint8Array} inputPriv - Private key of the input being spent (32 bytes)
  * @param {Uint8Array} scanPub - Own stealth scan public key (33 bytes)
  * @param {Uint8Array} spendPub - Own stealth spend public key (33 bytes)
  * @param {Uint8Array} spendPriv - Own stealth spend private key (32 bytes)
  * @param {Uint8Array} outpoint - TXID:vout of the input (36 bytes)
- * @param {number} outputIdx - Index of this output in the TX
+ * @param {number} outputIdx - Output index in the transaction
  * @returns {{ addr: string, pub: Uint8Array, priv: Uint8Array }}
  */
 export function deriveSelfStealth(inputPriv, scanPub, spendPub, spendPriv, outpoint, outputIdx) {
   const shared = secp256k1.getSharedSecret(inputPriv, scanPub);
   const sharedX = shared.slice(1, 33);
 
-  const idxBytes = u32LE(outputIdx);
-  const nonce = concat(outpoint, idxBytes);
-
+  const nonce = concat(outpoint, u32LE(outputIdx));
   const c = sha256(concat(sha256(sharedX), nonce));
   const cBig = BigInt('0x' + b2h(c)) % N_SECP;
 
   const spendPoint = secp256k1.ProjectivePoint.fromHex(spendPub);
-  const tweakPoint = secp256k1.ProjectivePoint.BASE.multiply(cBig);
-  const stealthPoint = spendPoint.add(tweakPoint);
+  const stealthPoint = spendPoint.add(secp256k1.ProjectivePoint.BASE.multiply(cBig));
   const stealthPubBytes = stealthPoint.toRawBytes(true);
 
   const addr = pubHashToCashAddr(ripemd160(sha256(stealthPubBytes)));
@@ -208,6 +407,67 @@ export function deriveSelfStealth(inputPriv, scanPub, spendPub, spendPriv, outpo
   const privKey = h2b(pBig.toString(16).padStart(64, '0'));
 
   return { addr, pub: stealthPubBytes, priv: privKey };
+}
+
+/* ========================================================================
+   Raw TX Parser — input pubkeys + outpoints
+   ======================================================================== */
+
+/**
+ * Parse a raw transaction hex and extract all P2PKH input pubkeys + outpoints.
+ * Returns entries compatible with scanForStealthPayments.
+ *
+ * @param {string} rawHex - Raw transaction hex string
+ * @param {string} [txid] - Transaction ID (big-endian hex). Computed if omitted.
+ * @returns {Array} [{ txid, vin, pubkey, outpointTxid, outpointVout, height }]
+ */
+export function parseRawTxInputs(rawHex, txid) {
+  const results = [];
+  try {
+    const raw = h2b(rawHex);
+
+    if (!txid) {
+      const h1 = sha256(raw);
+      const h2 = sha256(h1);
+      txid = b2h(new Uint8Array([...h2].reverse()));
+    }
+
+    let offset = 4; // version
+    const { value: inputCount, next: afterCount } = _readVarInt(raw, offset);
+    offset = afterCount;
+
+    for (let vin = 0; vin < inputCount; vin++) {
+      const prevTxidLE = raw.slice(offset, offset + 32);
+      offset += 32;
+      const vout = raw[offset] | (raw[offset+1] << 8) | (raw[offset+2] << 16) | (raw[offset+3] << 24);
+      offset += 4;
+
+      const { value: scriptLen, next: afterScriptLen } = _readVarInt(raw, offset);
+      offset = afterScriptLen;
+      const script = raw.slice(offset, offset + scriptLen);
+      offset += scriptLen;
+      offset += 4; // sequence
+
+      // P2PKH scriptSig: <sigPush><DER_sig+sighash><0x21><33-byte-pubkey>
+      if (script.length >= 35) {
+        const sigLen = script[0];
+        if (sigLen >= 0x47 && sigLen <= 0x49 && script[sigLen + 1] === 0x21) {
+          const pk = script.slice(sigLen + 2, sigLen + 2 + 33);
+          if ((pk[0] === 0x02 || pk[0] === 0x03) && pk.length === 33) {
+            results.push({
+              txid,
+              vin,
+              pubkey: b2h(pk),
+              outpointTxid: b2h(new Uint8Array([...prevTxidLE].reverse())),
+              outpointVout: vout,
+              height: 0,
+            });
+          }
+        }
+      }
+    }
+  } catch { /* partial parse ok */ }
+  return results;
 }
 
 /* ========================================================================
@@ -224,8 +484,8 @@ export function deriveSelfStealth(inputPriv, scanPub, spendPub, spendPriv, outpo
  * @example
  * const sk = StealthKeys.fromSeed(seedHex);
  * const code = sk.stealthCode;           // share with payers
- * const { addr, ephPub } = StealthKeys.deriveSendAddress(code);  // payer derives
- * const matches = sk.scanBlock(pubkeys); // receiver scans
+ * const { addr } = StealthKeys.deriveSendAddress(code, [privKey], [outpoint]);
+ * const found = await sk.scan(entries, fetchTxFn);
  */
 export class StealthKeys {
   /**
@@ -252,11 +512,9 @@ export class StealthKeys {
     const seedBytes = typeof seed === 'string' ? h2b(seed) : seed;
     const stealthNode = deriveBip352Node(seedBytes);
 
-    // m/352'/145'/0'/0' -- spend branch
     const spend = bip32Child(stealthNode.priv, stealthNode.chain, 0x80000000, true);
     const spendKey = bip32Child(spend.priv, spend.chain, 0, false);
 
-    // m/352'/145'/0'/1' -- scan branch
     const scan = bip32Child(stealthNode.priv, stealthNode.chain, 0x80000001, true);
     const scanKey = bip32Child(scan.priv, scan.chain, 0, false);
 
@@ -278,63 +536,32 @@ export class StealthKeys {
   }
 
   /**
-   * Generate a fresh stealth receive address (for displaying to a payer).
-   * This creates an ephemeral keypair internally and returns the one-time address.
+   * Static: derive a one-time send address from a stealth code (BIP352).
    *
-   * @returns {{ addr: string, pub: Uint8Array, ephPriv: Uint8Array, ephPub: Uint8Array }}
+   * @param {string}              stealthCode    - Recipient's stealth code
+   * @param {Uint8Array|Uint8Array[]} senderPrivKeys - Sender input private key(s)
+   * @param {Array}               [outpoints]    - [{ txid, vout }] — enables BIP352 aggregation
+   * @param {number}              [outputIndex]  - Output index k (default 0)
+   * @returns {{ addr: string, pub: Uint8Array, A_sum: Uint8Array }}
    */
-  deriveReceiveAddress() {
-    return deriveStealthSendAddr(this.scanPub, this.spendPub);
-  }
-
-  /**
-   * Static: derive a one-time send address from a stealth code (payer side).
-   * The payer calls this with the recipient's stealth code.
-   *
-   * @param {string} stealthCode - Recipient's stealth code
-   * @returns {{ addr: string, pub: Uint8Array, ephPriv: Uint8Array, ephPub: Uint8Array }}
-   */
-  static deriveSendAddress(stealthCode) {
+  static deriveSendAddress(stealthCode, senderPrivKeys, outpoints, outputIndex = 0) {
     const { scanPub, spendPub } = decodeStealthCode(stealthCode);
-    return deriveStealthSendAddr(scanPub, spendPub);
+    return deriveStealthSendAddr(scanPub, spendPub, senderPrivKeys, outpoints, outputIndex);
   }
 
   /**
-   * Check if a given input pubkey + tweak data corresponds to a payment to us.
+   * Scan indexer entries for incoming stealth payments (BIP352 aggregated).
    *
-   * @param {Uint8Array} inputPubkey - Sender's input public key (33 bytes) or ephemeral pub
-   * @param {Uint8Array} [tweakData] - Optional tweak data; defaults to inputPubkey
-   * @returns {{ address: string, privKey: Uint8Array, pub: Uint8Array }|null}
+   * @param {Array}    entries - [{ txid, pubkey, height, outpointTxid?, outpointVout? }]
+   * @param {Function} fetchTx - Async fn(txid) => rawHex
+   * @returns {Promise<Array>} Found payments
    */
-  scanPubkey(inputPubkey, tweakData) {
-    const tw = tweakData || inputPubkey;
-    const { pub, cBig } = stealthScan(this.scanPriv, inputPubkey, this.spendPub, tw);
-    const privKey = stealthSpendingKey(this.spendPriv, cBig);
-    const address = stealthPubToAddr(pub);
-    return { address, privKey, pub };
-  }
-
-  /**
-   * Batch scan: check multiple pubkeys for incoming stealth payments.
-   *
-   * @param {Uint8Array[]} pubkeys - Array of sender pubkeys to check
-   * @param {Uint8Array[]} [tweakDatas] - Optional per-pubkey tweak data
-   * @returns {Array<{ address: string, privKey: Uint8Array, pub: Uint8Array, index: number }>}
-   */
-  scanBlock(pubkeys, tweakDatas) {
-    const matches = [];
-    for (let i = 0; i < pubkeys.length; i++) {
-      const tw = tweakDatas ? tweakDatas[i] : pubkeys[i];
-      try {
-        const result = this.scanPubkey(pubkeys[i], tw);
-        if (result) {
-          matches.push({ ...result, index: i });
-        }
-      } catch {
-        // Invalid pubkey, skip
-      }
-    }
-    return matches;
+  scan(entries, fetchTx) {
+    return scanForStealthPayments(
+      { scanPriv: this.scanPriv, spendPub: this.spendPub, spendPriv: this.spendPriv },
+      entries,
+      fetchTx,
+    );
   }
 
   /**
@@ -351,4 +578,54 @@ export class StealthKeys {
       outpoint, outputIdx,
     );
   }
+}
+
+/* ========================================================================
+   Internal TX output parser
+   ======================================================================== */
+
+function _matchOutputs(rawHex, targetHash160) {
+  const matches = [];
+  try {
+    const raw = h2b(rawHex);
+    let offset = 4;
+
+    let inputCount = raw[offset++];
+    if (inputCount === 0) { offset++; inputCount = raw[offset++]; }
+    for (let i = 0; i < inputCount; i++) {
+      offset += 36;
+      const { value: scriptLen, next } = _readVarInt(raw, offset);
+      offset = next + scriptLen + 4;
+    }
+
+    const { value: outputCount, next: afterOutputCount } = _readVarInt(raw, offset);
+    offset = afterOutputCount;
+    for (let i = 0; i < outputCount; i++) {
+      const valueLo = raw[offset] | (raw[offset+1]<<8) | (raw[offset+2]<<16) | (raw[offset+3]<<24);
+      const valueHi = raw[offset+4] | (raw[offset+5]<<8) | (raw[offset+6]<<16) | (raw[offset+7]<<24);
+      const value = valueLo + valueHi * 0x100000000;
+      offset += 8;
+
+      const { value: scriptLen, next } = _readVarInt(raw, offset);
+      offset = next;
+      const script = raw.slice(offset, offset + scriptLen);
+      offset += scriptLen;
+
+      if (script.length === 25 && script[0] === 0x76 && script[1] === 0xa9 &&
+          script[2] === 0x14 && script[23] === 0x88 && script[24] === 0xac) {
+        if (b2h(script.slice(3, 23)) === targetHash160) {
+          matches.push({ idx: i, value });
+        }
+      }
+    }
+  } catch {}
+  return matches;
+}
+
+function _readVarInt(buf, offset) {
+  const first = buf[offset];
+  if (first < 0xfd) return { value: first, next: offset + 1 };
+  if (first === 0xfd) return { value: buf[offset+1] | (buf[offset+2] << 8), next: offset + 3 };
+  if (first === 0xfe) return { value: buf[offset+1] | (buf[offset+2]<<8) | (buf[offset+3]<<16) | (buf[offset+4]<<24), next: offset + 5 };
+  return { value: 0, next: offset + 9 };
 }
